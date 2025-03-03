@@ -38,3 +38,5 @@
 /.oh-my-zsh
 /.ssh
 /.sudo_as_admin_successful
+/calculate_total.py
+*.zip
