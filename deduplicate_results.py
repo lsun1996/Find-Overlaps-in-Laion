@@ -61,7 +61,7 @@ def deduplicate_and_classify(dataset_name, split, output_dir):
     logger.info(f"Successfully deduplicate and classfied {dataset_name}-{split}")
     return
 
-dataset_list = ["imagenet-a", "imagenet-o","imagenet-r", "cifar100", "caltech101", "cars", "aircraft", "country211", "fer2013", "food101", "imagenet-v2", "pets", "sun397"]
+dataset_list = ["imagenet-a", "imagenet-o","imagenet-r", "cifar100", "caltech101", "cars", "aircraft", "country211", "fer2013", "food101", "imagenetv2", "pets", "sun397"]
 splits = ["train", "test"]
 with ProcessPoolExecutor() as executor:
     futures = [executor.submit(deduplicate_and_classify, dataset_name, split, output_dir)
