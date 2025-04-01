@@ -15,7 +15,7 @@ import os
 from datasets import load_dataset
 
 """parameters:"""
-dataset_name = "fer2013"
+dataset_name = "cub"
 # class_type = ""
 batch_size = 64
 num_workers = 4
@@ -54,6 +54,8 @@ elif dataset_name == "imagenet-a":
 elif dataset_name == "imagenet-r":
     dataset = load_dataset("clip-benchmark/wds_imagenet-r")
     train_available = False
+elif dataset_name == "cub":
+    dataset = load_dataset("lxs784/cub-200-2011-clip-benchmark")
 
 # read classes from file
 classes = json.load(open(f"data/classes_{dataset_name}.json", "r"))
@@ -261,18 +263,18 @@ def evaluate_dataset_without(dataset_name, dataloader_train, dataloader_test, ca
     print(f"Top-1: {top1_accuracy:.2f}%  Top-5: {top5_accuracy:.2f}%")
     return top1_accuracy, top5_accuracy
 
-evaluate_dataset(dataset_name, dataloader_train, dataloader_test, classes)
-evaluate_dataset_without(dataset_name, dataloader_train, dataloader_test, "all_captions", classes)
+# evaluate_dataset(dataset_name, dataloader_train, dataloader_test, classes)
+# evaluate_dataset_without(dataset_name, dataloader_train, dataloader_test, "all_captions", classes)
 
-# evaluate_duplicates(dataset_name, "all_captions", classes)
-# evaluate_duplicates(dataset_name, "correct_captions", classes)
-# evaluate_duplicates(dataset_name, "relevant_captions", classes)
-# evaluate_duplicates(dataset_name, "irrelevant_captions", classes)
+evaluate_duplicates(dataset_name, "all_captions", classes)
+evaluate_duplicates(dataset_name, "correct_captions", classes)
+evaluate_duplicates(dataset_name, "relevant_captions", classes)
+evaluate_duplicates(dataset_name, "irrelevant_captions", classes)
 
-# evaluate_duplicates(dataset_name, "only_correct", classes)
-# evaluate_duplicates(dataset_name, "only_relevant", classes)
-# evaluate_duplicates(dataset_name, "only_irrelevant", classes)
-# evaluate_duplicates(dataset_name, "mixed", classes)
-# evaluate_duplicates(dataset_name, "correct_and_relevant", classes)
-# evaluate_duplicates(dataset_name, "correct_and_irrelevant", classes)
-# evaluate_duplicates(dataset_name, "relevant_and_irrelevant", classes)
+evaluate_duplicates(dataset_name, "only_correct", classes)
+evaluate_duplicates(dataset_name, "only_relevant", classes)
+evaluate_duplicates(dataset_name, "only_irrelevant", classes)
+evaluate_duplicates(dataset_name, "mixed", classes)
+evaluate_duplicates(dataset_name, "correct_and_relevant", classes)
+evaluate_duplicates(dataset_name, "correct_and_irrelevant", classes)
+evaluate_duplicates(dataset_name, "relevant_and_irrelevant", classes)

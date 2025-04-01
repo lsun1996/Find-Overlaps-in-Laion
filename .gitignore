@@ -42,3 +42,5 @@
 *.zip
 /filtered_results_all
 *.png
+/fp_figures
+file_compress.py
