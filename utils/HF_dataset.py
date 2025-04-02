@@ -4,8 +4,10 @@ from PIL import Image
 import imagehash
 from datasets import load_dataset
 from torch.utils.data import Dataset, DataLoader
+from typing import Optional, Dict, Any, Tuple, List
+
 class HFDataset(Dataset):
-    def __init__(self, root_dir: str, index_file: str, lookup: Optional[Dict] = None):
+    def __init__(self, root_dir: str, index_file: str, lookup: Optional[List[str]] = None):
         self.root_dir = root_dir
         with open(os.path.join(root_dir, index_file), "r") as f:
             self.index_data = json.load(f)
@@ -27,7 +29,7 @@ class HFDataset(Dataset):
 
         return index, text, ahash, phash, uid
 
-    def get_by_id(self, uid: str) -> Tuple[Image.Image, str, str, str]:
+    def get_by_id(self, uid: str) -> Tuple[Image.Image, str, imagehash.ImageHash, imagehash.ImageHash]:
         """
         Retrieve a raw PIL image and metadata by its unique identifier.
         """
@@ -35,7 +37,7 @@ class HFDataset(Dataset):
         image_path = os.path.join(self.root_dir, sample["image_path"])
         pil_image = Image.open(image_path).convert("RGB")
         text = self.lookup[sample["label"]] if self.lookup else sample["label"]
-        ahash = str(imagehash.average_hash(pil_image))
-        phash = str(imagehash.phash(pil_image))
+        ahash = imagehash.average_hash(pil_image)
+        phash = imagehash.phash(pil_image)
 
         return pil_image, text, ahash, phash

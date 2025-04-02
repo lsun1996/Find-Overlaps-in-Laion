@@ -23,33 +23,40 @@ from typing import Optional, Dict, Any, Tuple, List
 import torch
 import torch.nn.functional as F
 from lightning_cloud.utils.data_connection import add_s3_connection
-from laion_streaming_dataset import LAOINStreamingDataset
+from utils.laion_streaming_dataset import LAOINStreamingDataset
 from utils.HF_dataset_eval import HFDataset_eval
 from utils.HF_dataset import HFDataset
 from utils.optimize_hf_to_lightning import optimize_hf_to_lightning
 import clip
 import textwrap
+from openai import OpenAI
 
-# Set parameters
-dataset_name = "cifar100"
-threshold = 4
-k = 5
-batch_size = 64
-num_workers = 4
-sim_threshold = 0.88
+# ============= Parameter Configuration =============
+# Dataset Configuration
+dataset_name = "cifar100"  # Options: "cifar100", "caltech101", "food101", "cars", "country211", 
+                          # "sun397", "fer2013", "aircraft", "imagenetv2", "imagenet-o", "pets", 
+                          # "imagenet-a", "imagenet-r", "cub"
+
+# Search Parameters
+threshold = 4  # Maximum Hamming distance for considering images as duplicates (inclusive)
+k = 5  # Number of duplicate matches to show per image
+
+# Processing Parameters
+batch_size = 64  # Batch size for processing images
+num_workers = 4  # Number of worker processes for data loading
+sim_threshold = 0.88  # CLIP similarity threshold for filtering duplicates
+# ================================================
 
 # Load classes if needed
 try:
-    classes = json.load(open(f"data/classes_{dataset_name}.json", "r"))
+    classes = json.load(open(f"data/classes/classes_{dataset_name}.json", "r"))
     print(f"Number of classes: {len(classes)}")
 except FileNotFoundError:
     classes = None
     print("No classes file found, using raw labels")
 
 # Load the target dataset from Huggingface
-if dataset_name == "cifar100":
-    hf_dataset = load_dataset("clip-benchmark/wds_vtab-cifar100")
-elif dataset_name == "caltech101":
+if dataset_name == "caltech101":
     hf_dataset = load_dataset("clip-benchmark/wds_vtab-caltech101")
 elif dataset_name == "food101":
     hf_dataset = load_dataset("clip-benchmark/wds_food101")
@@ -75,6 +82,8 @@ elif dataset_name == "imagenet-r":
     hf_dataset = load_dataset("clip-benchmark/wds_imagenet-r")
 elif dataset_name == "cub":
     hf_dataset = load_dataset("lxs784/cub-200-2011-clip-benchmark")
+elif dataset_name == "cifar100":
+    hf_dataset = load_dataset("clip-benchmark/wds_vtab-cifar100")
 else:
     raise ValueError(f"Unsupported dataset: {dataset_name}")
 
@@ -87,6 +96,10 @@ elif hf_dataset[first_split][0]["jpg"] is not None:
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model, preprocess = clip.load("ViT-B/32", device=device)
+
+with open("api.json", "r") as f:
+    api_key = json.load(f)["api_key"]
+client = OpenAI(api_key=api_key)
 
 def hex_to_vector(hex_str, vector_dim=16):
     """
@@ -181,7 +194,7 @@ def find_duplicates(dataset_name: str, dataloader, threshold: int, binary_index_
 def resize_image(image, target_size=(256, 256)):
     return image.resize(target_size, Image.Resampling.LANCZOS)
 
-def visualize_duplicates(dataset: HFDataset, results: dict, output_dir: str = f"data/intermediate/{dataset_name}/plots", k: int = k):
+def visualize_duplicates(dataset_name: str, dataset: HFDataset, results: dict, laion, k: int = k):
     """
     Visualize duplicate pairs of images between target dataset and LAION-400M.
     
@@ -191,7 +204,9 @@ def visualize_duplicates(dataset: HFDataset, results: dict, output_dir: str = f"
         duplicates: List of (target_uid, laion_uid, distance) tuples
         save_dir: Directory to save visualization images
     """
+    output_dir = f"data/intermediate/{dataset_name}/plots"
     os.makedirs(output_dir, exist_ok=True)
+
     cols = k + 2
     for uid, match_indices in tqdm(results.items(), desc=f"plotting duplicate images for {dataset_name}"):
         fig, axes = plt.subplots(1, cols, figsize=(cols * 3, 3))
@@ -225,7 +240,7 @@ def visualize_duplicates(dataset: HFDataset, results: dict, output_dir: str = f"
         plt.close(fig)
     print(f"Visualizations saved to {output_dir}")
 
-def filter_and_visualize_duplicates(dataset: HFDataset, results: dict, output_dir: str = f"data/intermediate/{dataset_name}/plots", k: int = k, sim_threshold: float = 0.88):
+def filter_and_visualize_duplicates(dataset_name: str, dataset: HFDataset, results: dict, laion, k: int = k, sim_threshold: float = 0.88):
     """
     Visualize duplicate pairs of images between target dataset and LAION-400M.
     
@@ -235,8 +250,13 @@ def filter_and_visualize_duplicates(dataset: HFDataset, results: dict, output_di
         duplicates: List of (target_uid, laion_uid, distance) tuples
         save_dir: Directory to save visualization images
     """
+    output_dir = f"data/intermediate/{dataset_name}/plots"
     correct_dir = os.path.join(output_dir, "correct")
     incorrect_dir = os.path.join(output_dir, "incorrect")
+
+    output_indices = f"data/final/{dataset_name}/final_results.json"
+
+    final_results = {}
     os.makedirs(correct_dir, exist_ok=True)
     os.makedirs(incorrect_dir, exist_ok=True)
     cols = k + 2
@@ -269,23 +289,60 @@ def filter_and_visualize_duplicates(dataset: HFDataset, results: dict, output_di
                     match_features = model.encode_image(match_input)
                     match_features /= match_features.norm(dim=-1, keepdim=True)
                 similarity = (orig_features @ match_features.T).item()
+                
+                laion_phash = imagehash.phash(match_image)
+                p_dist = abs(phash - laion_phash)
+                ax.imshow(match_image)
+                caption_match = "dist: " + str(p_dist) + " " + match_text
+                wrapped_lines = textwrap.wrap(caption_match, width=24)
+                wrapped_caption_match = "\n".join(wrapped_lines[:2])
+                ax.set_title(wrapped_caption_match, fontsize=8)
                 if similarity >= sim_threshold:
-                    laion_phash = imagehash.phash(match_image)
-                    p_dist = abs(phash - laion_phash)
-                    ax.imshow(match_image)
-                    caption_match = "dist: " + str(p_dist) + " " + match_text
-                    wrapped_lines = textwrap.wrap(caption_match, width=24)
-                    wrapped_caption_match = "\n".join(wrapped_lines[:2])
-                    ax.set_title(wrapped_caption_match, fontsize=8)
+                    correct += 1
+                    if uid not in final_results:
+                        final_results[uid] = [idx]
+                    else:
+                        final_results[uid].append(idx)
             ax.axis('off')
         plt.tight_layout()
         if correct > 0:
             plt.savefig(os.path.join(correct_dir, f"{uid}.png"))
         else:
-            plt.savefig(os.path.join(incorrect_dir, f"{uid}.png"))
+            plt.savefig(os.path.join(incorrect_dir, f"{uid}.png")) # save to another directory
         plt.close(fig)
-    print(f"Filtered Visualizations saved to {output_dir}")
 
+    with open(output_indices, "w") as f:
+        json.dump(final_results, f)
+    print(f"Filtered Visualizations saved to {output_dir} and {output_indices}")
+    
+def classify_caption_gpt(caption, class_name):
+    prompt = f"""
+        You are a classification system that determines if a caption is relevant to a class name.
+        Steps to determine relevance:
+        1. Extract key words from the class name and caption.
+        2. Expand the class meaning to include:
+            its synonyms, hypernyms, hyponyms, inferred words based on category;
+            Cause and Effect: e.g., "fire" → "burn, heat, smoke";
+            Functional Association: e.g., "key" → "lock, door, security";
+            Situational Association: e.g., "beach" → "sand, sunshine, surfing";
+            Common Collocations: e.g., "eat" → "rice, breakfast, snacks, chopsticks";
+        3. Matching Criteria:
+            If the caption contains the exact class name or any expanded synonym and meanings → return "1".
+            If the caption has no relation to the class name → return "2".
+
+        Class Name: {class_name}
+        Caption: {caption}
+
+        Return only "1" or "2". No explanations.
+        """
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=20
+    )
+    cleaned_response = response.choices[0].message.content.strip().lower().replace('"', '').replace("'", "")
+    return cleaned_response
 def process_split(split_name: str, hf_split_dataset):
     """
     Process a single split of the dataset.
@@ -314,7 +371,11 @@ def process_split(split_name: str, hf_split_dataset):
     binary_index_phash = faiss.read_index_binary("lightning_binary_index.bin")
     
     # Find duplicates
-    duplicates = find_duplicates(target_dataset_name, dataloader, threshold, binary_index_phash, k)
+    existing_duplicates = f"data/intermediate/{target_dataset_name}/match_indices_{threshold}/combined_results.json"
+    if os.path.exists(existing_duplicates):
+        duplicates = json.load(open(existing_duplicates, "r"))
+    else:
+        duplicates = find_duplicates(target_dataset_name, dataloader, threshold, binary_index_phash, k)
  
     # Load LAION-400M dataset
     print("Loading LAION-400M dataset...")
@@ -322,8 +383,7 @@ def process_split(split_name: str, hf_split_dataset):
     laion = LAOINStreamingDataset(input_dir="/teamspace/s3_connections/laoin-400m")
 
     # Visualize duplicates
-    visualize_duplicates(target_dataset, duplicates)
-    filter_and_visualize_duplicates(target_dataset, duplicates)
+    filter_and_visualize_duplicates(target_dataset_name, target_dataset, duplicates, laion)
 
 def main():
     # Get all available splits

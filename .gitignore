@@ -44,3 +44,5 @@
 *.png
 /fp_figures
 file_compress.py
+file_cleanup.py
+*.pyc
