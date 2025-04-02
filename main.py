@@ -1,11 +1,3 @@
-"""
-Parameters:
-- dataset_name: the dataset to find duplicates for (e.g., "cifar100", "caltech101", etc.)
-- threshold(inclusive): the maximum distance for search results, in hamming distance
-- k: the number of results to show
-NOTE: need to provide classes as a list if labels are numerical ELSE LEFT THE CLASSES LIST EMPTY
-"""
-
 import os
 import glob
 import json
@@ -19,7 +11,7 @@ from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as transforms
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-from typing import Optional, Dict, Any, Tuple, List
+from typing import Optional, Dict, Any, Tuple, List, Set
 import torch
 import torch.nn.functional as F
 from lightning_cloud.utils.data_connection import add_s3_connection
@@ -30,10 +22,12 @@ from utils.optimize_hf_to_lightning import optimize_hf_to_lightning
 import clip
 import textwrap
 from openai import OpenAI
+import re
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # ============= Parameter Configuration =============
 # Dataset Configuration
-dataset_name = "cifar100"  # Options: "cifar100", "caltech101", "food101", "cars", "country211", 
+dataset_name = "cars"  # Options: "cifar100", "caltech101", "food101", "cars", "country211", 
                           # "sun397", "fer2013", "aircraft", "imagenetv2", "imagenet-o", "pets", 
                           # "imagenet-a", "imagenet-r", "cub"
 
@@ -100,6 +94,11 @@ model, preprocess = clip.load("ViT-B/32", device=device)
 with open("api.json", "r") as f:
     api_key = json.load(f)["api_key"]
 client = OpenAI(api_key=api_key)
+
+# Load LAION-400M dataset
+print("Loading LAION-400M dataset...")
+add_s3_connection("laoin-400m")
+laion = LAOINStreamingDataset(input_dir="/teamspace/s3_connections/laoin-400m")
 
 def hex_to_vector(hex_str, vector_dim=16):
     """
@@ -194,52 +193,6 @@ def find_duplicates(dataset_name: str, dataloader, threshold: int, binary_index_
 def resize_image(image, target_size=(256, 256)):
     return image.resize(target_size, Image.Resampling.LANCZOS)
 
-def visualize_duplicates(dataset_name: str, dataset: HFDataset, results: dict, laion, k: int = k):
-    """
-    Visualize duplicate pairs of images between target dataset and LAION-400M.
-    
-    Parameters:
-        target_dataset: The dataset to find duplicates for
-        laion_dataset: The LAION-400M dataset
-        duplicates: List of (target_uid, laion_uid, distance) tuples
-        save_dir: Directory to save visualization images
-    """
-    output_dir = f"data/intermediate/{dataset_name}/plots"
-    os.makedirs(output_dir, exist_ok=True)
-
-    cols = k + 2
-    for uid, match_indices in tqdm(results.items(), desc=f"plotting duplicate images for {dataset_name}"):
-        fig, axes = plt.subplots(1, cols, figsize=(cols * 3, 3))
-        axes[0].text(0.5, 0.5, uid, fontsize=24, ha='center', va='center')
-        axes[0].axis("off")
-
-        original_image, original_text, ahash, phash= dataset.get_by_id(uid)
-        original_image_resized = resize_image(original_image)
-        axes[1].imshow(original_image_resized)
-        wrapped_caption = "\n".join(textwrap.wrap(original_text, width=24))
-        axes[1].set_title(wrapped_caption)
-        axes[1].axis('off')
-
-        for j in range (k):
-            ax = axes[j + 2]
-            if j >= len(match_indices):
-                ax.imshow(np.ones((1, 1, 3)))
-            else:
-                idx = match_indices[j]
-                match_image, match_text, _ = laion[idx]
-                laion_phash = imagehash.phash(match_image)
-                p_dist = abs(phash - laion_phash)
-                ax.imshow(match_image)
-                caption_match = "p_dist: " + str(p_dist) + " " + match_text
-                wrapped_lines = textwrap.wrap(caption_match, width=24)
-                wrapped_caption_match = "\n".join(wrapped_lines[:2])
-                ax.set_title(wrapped_caption_match, fontsize=8)
-            ax.axis('off')
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, f"{uid}.png"))
-        plt.close(fig)
-    print(f"Visualizations saved to {output_dir}")
-
 def filter_and_visualize_duplicates(dataset_name: str, dataset: HFDataset, results: dict, laion, k: int = k, sim_threshold: float = 0.88):
     """
     Visualize duplicate pairs of images between target dataset and LAION-400M.
@@ -314,21 +267,17 @@ def filter_and_visualize_duplicates(dataset_name: str, dataset: HFDataset, resul
     with open(output_indices, "w") as f:
         json.dump(final_results, f)
     print(f"Filtered Visualizations saved to {output_dir} and {output_indices}")
-    
+
 def classify_caption_gpt(caption, class_name):
     prompt = f"""
-        You are a classification system that determines if a caption is relevant to a class name.
-        Steps to determine relevance:
-        1. Extract key words from the class name and caption.
-        2. Expand the class meaning to include:
-            its synonyms, hypernyms, hyponyms, inferred words based on category;
-            Cause and Effect: e.g., "fire" → "burn, heat, smoke";
-            Functional Association: e.g., "key" → "lock, door, security";
-            Situational Association: e.g., "beach" → "sand, sunshine, surfing";
-            Common Collocations: e.g., "eat" → "rice, breakfast, snacks, chopsticks";
+        You are a classification system that determines if a caption is relevant to a given class name.
+        Instructions:
+        1. Identify key words and meaningful components in both the class name and the caption. For compound class names (e.g., "Carolina wren" or "Golden retriever"), consider both the complete name and its individual components. A match on any significant part should be considered as evidence of relevance.
+        2. Expand the meaning of the class name by including synonyms, related terms, hypernyms, hyponyms, and inferred concepts that capture the broader or more specific context of the class. For instance, if the class name implies a specific category, also consider general or related terms that fall under the same category.
         3. Matching Criteria:
-            If the caption contains the exact class name or any expanded synonym and meanings → return "1".
-            If the caption has no relation to the class name → return "2".
+        - If the caption contains the full class name, any significant component of it, or any of the expanded related terms, then return "1" (indicating relevance).
+        - If the caption shows no connection to the class name or any of its expanded semantic associations, return "2" (indicating no relation).
+
 
         Class Name: {class_name}
         Caption: {caption}
@@ -342,7 +291,181 @@ def classify_caption_gpt(caption, class_name):
         max_tokens=20
     )
     cleaned_response = response.choices[0].message.content.strip().lower().replace('"', '').replace("'", "")
+    print(f"class: {class_name}, captions: {caption}, result: {cleaned_response}")
     return cleaned_response
+
+def is_fully_included(class_name: str, caption: str) -> bool:
+    """
+    Check if all words from class_name are fully included in the caption.
+    
+    Args:
+        class_name: The class name to check
+        caption: The caption to check against
+        
+    Returns:
+        True if all words are included, False otherwise
+    """
+    # Normalize caption by replacing hyphens and underscores with spaces.
+    normalized_caption = re.sub(r'[-_]', ' ', caption)
+    
+    # Split the class name into words.
+    words = re.split(r'[\W_]+', class_name)
+    words = [word for word in words if word]
+
+    # For each word, search in the normalized caption. Allow optional trailing digits.
+    return all(
+        re.search(r'\b' + re.escape(word) + r'\d*\b', normalized_caption, flags=re.IGNORECASE)
+        for word in words
+    )
+
+def process_item(item: Tuple[str, List[int]], dataset: HFDataset) -> Tuple[str, int, int, int]:
+    """
+    Process a single item to classify its captions.
+    
+    Args:
+        item: Tuple of (uid, indices)
+        dataset: The target dataset
+        laion: The LAION dataset
+        client: Optional OpenAI client for GPT classification
+        
+    Returns:
+        Tuple of (uid, correct, relevant, irrelevant)
+    """
+    uid, indices = item
+    _, class_name, _, _ = dataset.get_by_id(uid)
+
+    correct = 0
+    relevant = 0
+    irrelevant = 0
+
+    for index in indices:
+        laion_caption = laion[index][1]
+        if is_fully_included(class_name, laion_caption):
+            correct = 1
+        elif client is not None:
+            response = classify_caption_gpt(laion_caption, class_name)
+            if response == "1":
+                relevant = 1
+            elif response == "2":
+                irrelevant = 1
+            else:
+                print(f"ERROR: unexpected response for {uid}, {index}: {response}")
+
+    return uid, correct, relevant, irrelevant
+
+def categorize_results(all_captions: List[str], correct_captions: List[str], 
+                      relevant_captions: List[str], irrelevant_captions: List[str]) -> Dict[str, List[str]]:
+    """
+    Categorize results into different sets based on caption classifications.
+    
+    Args:
+        all_captions: List of all caption UIDs
+        correct_captions: List of UIDs with correct captions
+        relevant_captions: List of UIDs with relevant captions
+        irrelevant_captions: List of UIDs with irrelevant captions
+        
+    Returns:
+        Dictionary mapping category names to lists of UIDs
+    """
+    categories = {
+        "only_correct": [],
+        "only_relevant": [],
+        "only_irrelevant": [],
+        "correct_and_relevant": [],
+        "correct_and_irrelevant": [],
+        "relevant_and_irrelevant": [],
+        "mixed": []
+    }
+    
+    for uid in all_captions:
+        is_correct = uid in correct_captions
+        is_relevant = uid in relevant_captions
+        is_irrelevant = uid in irrelevant_captions
+        
+        if is_correct and not is_relevant and not is_irrelevant:
+            categories["only_correct"].append(uid)
+        elif is_relevant and not is_correct and not is_irrelevant:
+            categories["only_relevant"].append(uid)
+        elif is_irrelevant and not is_correct and not is_relevant:
+            categories["only_irrelevant"].append(uid)
+        elif is_correct and is_relevant and not is_irrelevant:
+            categories["correct_and_relevant"].append(uid)
+        elif is_correct and is_irrelevant and not is_relevant:
+            categories["correct_and_irrelevant"].append(uid)
+        elif is_relevant and is_irrelevant and not is_correct:
+            categories["relevant_and_irrelevant"].append(uid)
+        elif is_correct and is_relevant and is_irrelevant:
+            categories["mixed"].append(uid)
+        else:
+            print(f"Error! Unexpected classification for uid: {uid}")
+    
+    return categories
+
+def process_item_wrapper(item_dataset_tuple):
+    """
+    A wrapper function to call process_item with the provided arguments.
+    This avoids using a lambda (which can cause pickling issues).
+    """
+    item, dataset = item_dataset_tuple
+    return process_item(item, dataset)
+
+
+def analyze_duplicates(dataset_name: str, dataset: HFDataset, 
+                       final_results: Dict[str, List[int]]) -> None:
+    """
+    Analyze duplicates and classify their captions.
+    
+    Args:
+        dataset_name: Name of the target dataset.
+        dataset: The target dataset.
+        final_results: Dictionary mapping UIDs to lists of duplicate indices.
+    """
+    print(f"Processing results of {dataset_name}...")
+    
+    # Initialize lists for different caption types
+    all_captions = []
+    correct_captions = []
+    relevant_captions = []
+    irrelevant_captions = []
+    
+    # Prepare items for processing
+    items = list(final_results.items())
+    
+    # Use ProcessPoolExecutor and as_completed to update the progress bar as tasks finish.
+    results = []
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        # Prepare tuples so that both 'item' and 'dataset' can be passed.
+        futures = {executor.submit(process_item_wrapper, (item, dataset)): item for item in items}
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Analyzing duplicates"):
+            try:
+                result = future.result()
+                results.append(result)
+            except Exception as e:
+                print(f"Error processing item: {e}")
+    
+    # Collect results from processed items
+    for uid, correct, relevant, irrelevant in results:
+        all_captions.append(uid)
+        correct_captions.extend([uid] * correct)
+        relevant_captions.extend([uid] * relevant)
+        irrelevant_captions.extend([uid] * irrelevant)
+    
+    # Save initial results to JSON files
+    output_dir = f"data/final/{dataset_name}/duplicate_categories"
+    os.makedirs(output_dir, exist_ok=True)
+    json.dump(all_captions, open(os.path.join(output_dir, "all_captions.json"), "w"))
+    json.dump(correct_captions, open(os.path.join(output_dir, "correct_captions.json"), "w"))
+    json.dump(relevant_captions, open(os.path.join(output_dir, "relevant_captions.json"), "w"))
+    json.dump(irrelevant_captions, open(os.path.join(output_dir, "irrelevant_captions.json"), "w"))
+    
+    # Categorize and save final results
+    categories = categorize_results(all_captions, correct_captions, relevant_captions, irrelevant_captions)
+    for category, uids in categories.items():
+        json.dump(uids, open(os.path.join(output_dir, f"{category}.json"), "w"))
+        print(f"{category}: {len(uids)}")
+    
+    print("Analysis complete!")
+
 def process_split(split_name: str, hf_split_dataset):
     """
     Process a single split of the dataset.
@@ -376,14 +499,15 @@ def process_split(split_name: str, hf_split_dataset):
         duplicates = json.load(open(existing_duplicates, "r"))
     else:
         duplicates = find_duplicates(target_dataset_name, dataloader, threshold, binary_index_phash, k)
- 
-    # Load LAION-400M dataset
-    print("Loading LAION-400M dataset...")
-    add_s3_connection("laoin-400m")
-    laion = LAOINStreamingDataset(input_dir="/teamspace/s3_connections/laoin-400m")
 
     # Visualize duplicates
     filter_and_visualize_duplicates(target_dataset_name, target_dataset, duplicates, laion)
+
+    # # After finding duplicates
+    # final_results_file = f"data/final/{target_dataset_name}/final_results.json"
+    # final_results = json.load(open(final_results_file, "r"))
+
+    # analyze_duplicates(target_dataset_name, target_dataset, final_results)
 
 def main():
     # Get all available splits

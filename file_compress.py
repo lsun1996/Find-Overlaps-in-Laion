@@ -8,7 +8,7 @@ def compress_folder(dir_to_compress, output_zip):
     print(f"Folder {dir_to_compress} compressed successfully into {output_zip}")
 
 if __name__ == "__main__":
-    # folder = "/teamspace/studios/this_studio/data/intermediate/food101-train"
-    # compress_folder(folder, "food101-train-clip-plots")
-    folder = "/teamspace/studios/this_studio/data/intermediate/cub-test"
-    compress_folder(folder, "cub-test")
+    folder = "/teamspace/studios/this_studio/data/intermediate/country211-test/plots"
+    compress_folder(folder, "country211-test-plots")
+    folder = "/teamspace/studios/this_studio/data/intermediate/country211-train/plots"
+    compress_folder(folder, "country211-train-plots")
