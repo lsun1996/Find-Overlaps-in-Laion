@@ -11,13 +11,10 @@ import io
 
 
 class LAOINStreamingDataset(StreamingDataset):
-
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.serializer = JPEGSerializer()
 
     def __getitem__(self, index):
         id, image, text, _, _, _ = super().__getitem__(index)
-        # pil_image = Image.open(io.BytesIO(image)).convert("RGB")
-        # phash = str(imagehash.phash(pil_image))
         return Image.open(io.BytesIO(image)), text, str(id)
